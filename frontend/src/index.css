@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body { @apply bg-white text-ink-900 antialiased; }
+  h1, h2, h3, h4 { @apply font-display tracking-tight text-ink-950; }
+  :focus-visible { @apply outline-none ring-2 ring-teal-700 ring-offset-2; }
+  .on-tint :focus-visible { @apply ring-ink-900 ring-offset-teal-400; }
+  .on-rose :focus-visible { @apply ring-white ring-offset-rose-600; }
+}
+
+@layer components {
+  .input {
+    @apply block w-full rounded-lg border border-ink-200 bg-white px-3 py-2.5 text-base text-ink-900
+           placeholder:text-ink-300 focus:border-ink-500 disabled:bg-paper disabled:text-ink-400;
+  }
+  .input[aria-invalid='true'] { @apply border-rose-600; }
+  .panel { @apply rounded-xl border border-ink-100 bg-white; }
+  /* The four palette colours as a thin rule at the top of the headers. */
+  .brand-bar { @apply h-1 w-full bg-brand-gradient; }
+  /* A word picked out in butter yellow on the teal hero, with dark text so it stays readable. */
+  .mark-accent { @apply rounded-md bg-sun-300 px-1.5 text-ink-950; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .container-page { @apply mx-auto w-full max-w-6xl px-4 sm:px-6; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
