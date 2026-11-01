@@ -8,7 +8,7 @@ export default defineConfig({
     port: 5173, strictPort: true ,
     host: '0.0.0.0',
     allowedHosts: [
-      'sb-1cy4nquixftu.vercel.run'
+      '.vercel.run'
     ]
   },
   test: {
