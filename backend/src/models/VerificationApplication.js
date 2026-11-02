@@ -5,6 +5,8 @@ const { toJSONOptions } = require('./helpers');
 const APPLICATION_STATUS = ['pending_payment', 'payment_confirmed', 'under_review', 'more_info_required', 'recommended', 'approved', 'rejected'];
 const PAYMENT_STATUS = ['unpaid', 'pending', 'confirmed', 'failed', 'waived'];
 const FINAL_STATUS = ['approved', 'rejected'];
+// 'provider': a service provider's profile (paid review). 'account': a customer or business account (no fee, same review steps).
+const APPLICATION_KINDS = ['provider', 'account'];
 
 const historySchema = new mongoose.Schema(
   {
@@ -34,7 +36,8 @@ const snapshotSchema = new mongoose.Schema({ average: Number, count: Number, com
 
 const applicationSchema = new mongoose.Schema(
   {
-    provider: { type: mongoose.Schema.Types.ObjectId, ref: 'ProviderProfile', required: true },
+    kind: { type: String, enum: APPLICATION_KINDS, default: 'provider' },
+    provider: { type: mongoose.Schema.Types.ObjectId, ref: 'ProviderProfile' }, // absent for an 'account' application
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     status: { type: String, enum: APPLICATION_STATUS, default: 'pending_payment' },
     paymentStatus: { type: String, enum: PAYMENT_STATUS, default: 'unpaid' },
@@ -53,9 +56,12 @@ const applicationSchema = new mongoose.Schema(
   { timestamps: true, toJSON: toJSONOptions() },
 );
 
-applicationSchema.index({ provider: 1 }, { unique: true, partialFilterExpression: { active: true } }); // one open application per provider
+// One open application per provider, and one open account application per person. (Run `npm run migrate:account-verification` once on an
+// existing database: it replaces the older provider-only index, which would treat every account application as the same provider.)
+applicationSchema.index({ provider: 1 }, { name: 'provider_active_unique', unique: true, partialFilterExpression: { active: true, provider: { $exists: true } } });
+applicationSchema.index({ user: 1 }, { name: 'account_active_unique', unique: true, partialFilterExpression: { active: true, kind: 'account' } });
 applicationSchema.index({ status: 1, updatedAt: -1 });
 applicationSchema.index({ user: 1, createdAt: -1 });
 
 module.exports = mongoose.model('VerificationApplication', applicationSchema);
-Object.assign(module.exports, { APPLICATION_STATUS, PAYMENT_STATUS, FINAL_STATUS });
+Object.assign(module.exports, { APPLICATION_STATUS, PAYMENT_STATUS, FINAL_STATUS, APPLICATION_KINDS });

@@ -37,7 +37,14 @@ export const LISTING_STATUS = {
   archived: { label: 'Archived', tone: 'neutral' },
 };
 
-
+// A provider PROFILE's status (see below for an application's review status).
+export const PROFILE_VERIFICATION_STATUS = {
+  unverified: { label: 'Not verified', tone: 'neutral' },
+  pending: { label: 'Awaiting review', tone: 'warning' },
+  needs_info: { label: 'More information needed', tone: 'warning' },
+  verified: { label: 'Verified', tone: 'success' },
+  rejected: { label: 'Not approved', tone: 'danger' },
+};
 
 export const SERVICE_SORTS = [
   { value: 'top', label: 'Top ranked' },

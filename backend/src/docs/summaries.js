@@ -121,6 +121,9 @@ module.exports = {
   'PUT /announcements/{id}': 'Edit, hide, show or set an end time on an announcement (super administrator only; audited)',
   'DELETE /announcements/{id}': 'Remove an announcement (super administrator only; audited)',
   // ---- Paid verification, documents, terms, contracts, ratings ----
+  'GET /verification/account/me': 'Your account verification request (customers and businesses), what is missing and what staff asked',
+  'POST /verification/account/apply': 'Ask to have your account verified; your uploaded documents go to the reviewers (free)',
+  'POST /verification/account/respond': 'Answer the reviewers\' question about your account verification',
   'GET /verification/fee': 'The verification fee, currency and payment instructions published by the super administrator',
   'GET /verification/me': 'Your verification application, fee, payment and what is still missing',
   'POST /verification/apply': 'Apply for verification (needs your documents, accepted terms and a published fee); payment comes next',

@@ -1,6 +1,6 @@
 const { z } = require('zod');
 const { METHODS } = require('../models/VerificationPayment');
-const { APPLICATION_STATUS, PAYMENT_STATUS } = require('../models/VerificationApplication');
+const { APPLICATION_STATUS, PAYMENT_STATUS, APPLICATION_KINDS } = require('../models/VerificationApplication');
 const { DOCUMENT_KINDS } = require('../models/UserDocument');
 const { paginationQuery, optionalParam, isoDay } = require('./commonValidators');
 
@@ -23,7 +23,7 @@ const decisionBody = z
   .object({ outcome: z.enum(['approved', 'rejected']), reason: text(5, 600).optional() })
   .strict()
   .superRefine((v, ctx) => { if (v.outcome === 'rejected' && !v.reason) ctx.addIssue({ code: 'custom', path: ['reason'], message: 'Give a reason for rejecting' }); });
-const listApplicationsQuery = paginationQuery.extend({ status: optionalParam(z.enum(APPLICATION_STATUS)), paymentStatus: optionalParam(z.enum(PAYMENT_STATUS)) });
+const listApplicationsQuery = paginationQuery.extend({ status: optionalParam(z.enum(APPLICATION_STATUS)), paymentStatus: optionalParam(z.enum(PAYMENT_STATUS)), kind: optionalParam(z.enum(APPLICATION_KINDS)) });
 const listPaymentsQuery = paginationQuery.extend({ status: optionalParam(z.enum(['pending', 'succeeded', 'failed', 'cancelled'])) });
 const confirmPaymentBody = z.object({ reference: text(4, 100), note: text(1, 300).optional() }).strict();
 

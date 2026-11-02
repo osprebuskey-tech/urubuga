@@ -18,6 +18,11 @@ router.post('/apply', provider, requireVerifiedEmail, requireTerms, writeLimiter
 router.post('/payment', provider, requireVerifiedEmail, writeLimiter, validate({ body: v.paymentBody }), ctrl.pay);
 router.post('/payment/cancel', provider, ctrl.cancelPay);
 router.post('/respond', provider, writeLimiter, validate({ body: v.respondBody }), ctrl.respond);
+// Customers and business accounts ask to be verified too: free, with the same document review.
+const account = requireRoles(ROLES.CUSTOMER, ROLES.BUSINESS);
+router.get('/account/me', account, ctrl.mineAccount);
+router.post('/account/apply', account, requireVerifiedEmail, requireTerms, writeLimiter, ctrl.applyAccount);
+router.post('/account/respond', account, writeLimiter, validate({ body: v.respondBody }), ctrl.respondAccount);
 // Development only (404 unless the sandbox gateway is on and NODE_ENV is not production).
 router.post('/payment/sandbox/:outcome', provider, validate({ params: v.sandboxParams }), ctrl.sandbox);
 

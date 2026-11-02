@@ -9,6 +9,10 @@ export const verificationApi = {
   pay: (body) => post('/verification/payment', body),
   cancelPayment: () => post('/verification/payment/cancel'),
   respond: (message) => post('/verification/respond', { message }),
+  // customers and businesses (free, same review)
+  mineAccount: (signal) => get('/verification/account/me', { signal }),
+  applyAccount: () => post('/verification/account/apply'),
+  respondAccount: (message) => post('/verification/account/respond', { message }),
   sandbox: (outcome) => post(`/verification/payment/sandbox/${outcome}`),
   // staff
   list: (query, signal) => get('/admin/verification', { query, signal }),

@@ -12,6 +12,7 @@
     "start": "node src/server.js",
     "seed": "node src/scripts/seed.js",
     "migrate:verification-upgrade": "node src/scripts/migrateVerificationUpgrade.js",
+    "migrate:account-verification": "node src/scripts/migrateAccountVerification.js",
     "seed:categories": "node src/scripts/seed.js --categories-only",
     "create-admin": "node src/scripts/createAdmin.js",
     "create-super-admin": "node src/scripts/createAdmin.js --super",

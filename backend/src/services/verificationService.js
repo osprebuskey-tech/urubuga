@@ -5,6 +5,7 @@ const UserDocument = require('../models/UserDocument');
 const ProviderProfile = require('../models/ProviderProfile');
 const ServiceListing = require('../models/ServiceListing');
 const User = require('../models/User');
+const AuditLog = require('../models/AuditLog');
 const AppError = require('../utils/AppError');
 const logger = require('../config/logger');
 const gateways = require('./payments');
@@ -12,9 +13,10 @@ const settings = require('./settingsService');
 const documentService = require('./documentService');
 const notifications = require('./notificationService');
 const audit = require('./auditService');
-const { ROLES, isSuperAdmin } = require('../utils/roles');
+const { ROLES, isSuperAdmin, isAdmin } = require('../utils/roles');
 
 const idOf = (v) => String(v?._id ?? v);
+const isAccount = (app) => app.kind === 'account';
 const NOT_FOUND = () => new AppError(404, 'Verification application not found', 'APPLICATION_NOT_FOUND');
 const PAID = ['confirmed', 'waived']; // payment states that allow review
 const OPEN = ['pending_payment', 'payment_confirmed', 'under_review', 'more_info_required', 'recommended'];
@@ -36,6 +38,13 @@ async function move(app, from, set, historyEntry) {
 
 /** Keeps the provider's profile in step with the application: status, the administrator's note, and (when answering) their reply. */
 function profileStatus(app, status, note, extra = {}) {
+  if (isAccount(app)) {
+    // An account application has no profile: approval marks the account itself as verified (the same fields the super administrator's direct Verify uses).
+    if (status !== 'verified') return null;
+    const set = { accountVerified: true, accountVerifiedAt: extra.verifiedAt || new Date(), accountVerifiedBy: extra.verifiedBy };
+    if (note) set.accountVerificationNote = String(note).slice(0, 500);
+    return User.updateOne({ _id: app.user }, { $set: set });
+  }
   const set = { verificationStatus: status, ...extra };
   const unset = {};
   if (note) set.verificationNote = note; else unset.verificationNote = '';
@@ -49,7 +58,14 @@ const ratingSnapshot = async (providerId) => {
 };
 
 const superAdminIds = async () => (await User.find({ roles: ROLES.SUPER_ADMIN, status: 'active' }).select('_id')).map((u) => u._id);
-const tell = (user, title, body) => notifications.notify(user, { type: 'verification.updated', title, body, link: '/dashboard/provider/verification' });
+const tell = (user, title, body, app) => notifications.notify(user, { type: 'verification.updated', title, body, link: app && isAccount(app) ? '/dashboard/verification' : '/dashboard/provider/verification' });
+
+/** Tells every active administrator and super administrator that something is waiting for them. Never fails the main action. */
+async function notifyReviewers(app, title, body) {
+  const staff = await User.find({ roles: { $in: [ROLES.ADMIN, ROLES.SUPER_ADMIN] }, status: 'active' }).select('_id');
+  await notifications.notifyMany(staff.map((u) => u._id), { type: 'verification.updated', title, body: String(body).slice(0, 380), link: `/dashboard/admin/verification/${app._id}` });
+}
+const applicantName = async (userId) => (await User.findById(userId).select('fullName'))?.fullName ?? 'An applicant'
 
 // ---------------------------------------------------------------------------------------------
 // JSON views. The applicant sees their own process; staff also see documents, ratings and the internal trail.
@@ -59,7 +75,7 @@ const paymentJSON = (p) => p && ({ id: String(p._id), method: p.method, gateway:
 function toApplicantJSON(app, payment) {
   const lastAsk = app.infoRequests[app.infoRequests.length - 1];
   return {
-    id: String(app._id), status: app.status, paymentStatus: app.paymentStatus, fee: app.fee, active: app.active,
+    id: String(app._id), kind: app.kind || 'provider', status: app.status, paymentStatus: app.paymentStatus, fee: app.fee, active: app.active,
     question: app.status === 'more_info_required' && lastAsk && !lastAsk.respondedAt ? lastAsk.message : undefined,
     decision: app.decision?.outcome ? { outcome: app.decision.outcome, reason: app.decision.reason, at: app.decision.at } : undefined,
     payment: paymentJSON(payment),
@@ -68,33 +84,38 @@ function toApplicantJSON(app, payment) {
   };
 }
 
-async function toStaffJSON(app, { detail = false } = {}) {
+async function toStaffJSON(app, { detail = false, viewer } = {}) {
   const base = {
-    id: String(app._id), status: app.status, paymentStatus: app.paymentStatus, fee: app.fee, active: app.active,
-    provider: { id: idOf(app.provider), displayName: app.provider?.displayName, providerType: app.provider?.providerType, ratingAvg: app.provider?.ratingAvg, ratingCount: app.provider?.ratingCount, completedJobs: app.provider?.completedJobs },
-    applicant: { name: app.user?.fullName, email: app.user?.email },
+    id: String(app._id), kind: app.kind || 'provider', status: app.status, paymentStatus: app.paymentStatus, fee: app.fee, active: app.active,
+    provider: isAccount(app) ? undefined : { id: idOf(app.provider), displayName: app.provider?.displayName, providerType: app.provider?.providerType, ratingAvg: app.provider?.ratingAvg, ratingCount: app.provider?.ratingCount, completedJobs: app.provider?.completedJobs },
+    applicant: { name: app.user?.fullName, email: app.user?.email, roles: app.user?.roles },
     recommendation: app.recommendation?.by ? { note: app.recommendation.note, at: app.recommendation.at, ratings: app.recommendation.ratings } : undefined,
     decision: app.decision?.outcome ? { outcome: app.decision.outcome, byRole: app.decision.byRole, reason: app.decision.reason, at: app.decision.at } : undefined,
     createdAt: app.createdAt, updatedAt: app.updatedAt,
   };
   if (!detail) return base;
+  // Private details, for administrators and the super administrator only (the route enforces that; viewing is audited). They let staff
+  // check that the documents and a manual payment belong to the person who asked.
+  base.applicant = { ...base.applicant, phone: app.user?.phone, emailConfirmed: Boolean(app.user?.emailVerified), joinedAt: app.user?.createdAt };
+  if (!isAccount(app)) base.provider = { ...base.provider, bio: app.provider?.bio, district: app.provider?.location?.district };
+  const opened = viewer ? await openedBy(viewer, app.documents) : new Set();
   const [docs, payments, openRec] = await Promise.all([
     UserDocument.find({ _id: { $in: app.documents } }),
     VerificationPayment.find({ application: app._id }).sort({ createdAt: -1 }),
-    VerificationRecommendation.findOne({ provider: idOf(app.provider), status: 'open' }),
+    isAccount(app) ? null : VerificationRecommendation.findOne({ provider: idOf(app.provider), status: 'open' }),
   ]);
   return {
     ...base,
-    documents: docs.map(documentService.toJSON),
+    documents: docs.map((d) => ({ ...documentService.toJSON(d), openedByMe: viewer ? opened.has(String(d._id)) : undefined })),
     payments: payments.map(paymentJSON),
     infoRequests: app.infoRequests.map((r) => ({ message: r.message, at: r.at, response: r.response, respondedAt: r.respondedAt })),
     history: app.history.map((h) => ({ at: h.at, role: h.role, action: h.action, from: h.from, to: h.to, note: h.note })),
-    ratingsNow: await ratingSnapshot(idOf(app.provider)),
+    ratingsNow: isAccount(app) ? undefined : await ratingSnapshot(idOf(app.provider)),
     adminRecommendationOpen: openRec ? { note: openRec.note, ratings: openRec.ratings } : undefined,
   };
 }
 
-const withRefs = (q) => q.populate('provider', 'displayName providerType ratingAvg ratingCount completedJobs').populate('user', 'fullName email');
+const withRefs = (q) => q.populate('provider', 'displayName providerType ratingAvg ratingCount completedJobs bio location.district').populate('user', 'fullName email roles phone emailVerified createdAt');
 
 // ---------------------------------------------------------------------------------------------
 // Applicant
@@ -149,6 +170,7 @@ async function apply(user, ctx) {
     throw err;
   }
   await profileStatus(app, 'pending');
+  if (free) await notifyReviewers(app, 'A provider is ready for verification review', `${profile.displayName} applied for verification (no fee). Open the application to review the documents.`);
   await audit.record({ actor: user._id, action: 'verification.applied', entityType: 'VerificationApplication', entityId: app._id, metadata: { fee: app.fee }, ctx });
   return toApplicantJSON(app, null);
 }
@@ -202,13 +224,14 @@ async function cancelPayment(user) {
   return paymentJSON(payment);
 }
 
-/** The applicant answers an administrator's question; the application goes back to review. */
-async function respond(user, { message }) {
-  const profile = await ownProfile(user);
-  const app = await VerificationApplication.findOne({ provider: profile._id, active: true });
+/** The applicant answers an administrator's question; the application goes back to review. kind: 'provider' (default) or 'account'. */
+async function respond(user, { message }, kind = 'provider') {
+  const account = kind === 'account';
+  const profile = account ? null : await ownProfile(user);
+  const app = await VerificationApplication.findOne(account ? { user: user._id, kind: 'account', active: true } : { provider: profile._id, active: true });
   if (!app || app.status !== 'more_info_required') throw new AppError(409, 'There is no open question to answer', 'INVALID_TRANSITION');
   const idx = app.infoRequests.length - 1;
-  const required = await documentService.requiredKinds(user, 'provide');
+  const required = await documentService.requiredKinds(user, account ? 'hire' : 'provide');
   const docs = await UserDocument.find({ owner: user._id, status: 'active', kind: { $in: required } }).select('_id');
   const updated = await VerificationApplication.findOneAndUpdate(
     { _id: app._id, status: 'more_info_required' },
@@ -216,8 +239,47 @@ async function respond(user, { message }) {
     { new: true },
   );
   if (!updated) throw new AppError(409, 'This application just changed. Reload and try again.', 'APPLICATION_CHANGED');
-  await profileStatus(app, 'pending', profile.verificationNote, { verificationResponse: message }); // the question stays beside the reply
+  if (profile) await profileStatus(app, 'pending', profile.verificationNote, { verificationResponse: message }); // the question stays beside the reply
+  await notifyReviewers(app, 'An applicant answered your question', `${await applicantName(user._id)} replied: ${message}`);
   return toApplicantJSON(updated, null);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Account verification: customers and business accounts. The same review steps as a provider, with no fee.
+// ---------------------------------------------------------------------------------------------
+async function getMineAccount(user) {
+  const app = await VerificationApplication.findOne({ user: user._id, kind: 'account' }).sort({ createdAt: -1 });
+  const fresh = await User.findById(user._id).select('accountVerified accountVerifiedAt');
+  const docs = await documentService.status(user);
+  return {
+    accountVerified: Boolean(fresh?.accountVerified),
+    verifiedAt: fresh?.accountVerifiedAt,
+    application: app ? toApplicantJSON(app, null) : null,
+    documents: docs.requirements.hire ?? null,
+  };
+}
+
+async function applyAccount(user, ctx) {
+  const fresh = await User.findById(user._id).select('accountVerified');
+  if (fresh?.accountVerified) throw new AppError(409, 'Your account is already verified', 'ALREADY_VERIFIED');
+  if (await VerificationApplication.exists({ user: user._id, kind: 'account', active: true })) throw new AppError(409, 'You already have a verification request in progress', 'ALREADY_PENDING');
+
+  const required = await documentService.assertComplete(user, 'hire');
+  const docs = await UserDocument.find({ owner: user._id, status: 'active', kind: { $in: required } }).select('_id');
+  let app;
+  try {
+    app = await VerificationApplication.create({
+      kind: 'account', user: user._id, fee: { amount: 0, currency: 'RWF' }, documents: docs.map((d) => d._id),
+      status: 'payment_confirmed', paymentStatus: 'waived', // account verification is free, so it goes straight to the reviewers
+      history: [entry(user, 'applicant', 'applied', undefined, 'payment_confirmed', 'Account verification requested')],
+    });
+  } catch (err) {
+    if (err.code === 11000) throw new AppError(409, 'You already have a verification request in progress', 'ALREADY_PENDING');
+    throw err;
+  }
+  await audit.record({ actor: user._id, action: 'verification.applied', entityType: 'VerificationApplication', entityId: app._id, metadata: { kind: 'account' }, ctx });
+  await notifyReviewers(app, 'New account verification request', `${user.fullName} asked to be verified. Open the request to review their documents.`);
+  return toApplicantJSON(app, null);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -237,16 +299,32 @@ async function applyPaymentSuccess(payment, { source, by, reference, note }) {
   );
   if (app && app.status === 'pending_payment') {
     await VerificationApplication.updateOne({ _id: app._id, status: 'pending_payment' }, { $set: { status: 'payment_confirmed' }, $push: { history: entry(undefined, 'system', 'status_changed', 'pending_payment', 'payment_confirmed') } });
+    await notifyReviewers(app, 'A provider is ready for verification review', `${await applicantName(payment.user)} paid the verification fee. Open the application to review the documents.`);
   }
   await audit.record({ actor: by?._id, action: 'verification.payment_confirmed', entityType: 'VerificationPayment', entityId: payment._id, metadata: { source, amount: payment.amount, currency: payment.currency }, strict: Boolean(by) });
   await tell(payment.user, 'Payment confirmed', 'Your verification fee was received. Your documents will now be reviewed. Payment alone does not verify you.');
   return 'succeeded';
 }
 
+/** Which of these documents this person has opened (each opening is in the audit log). */
+async function openedBy(staff, documentIds) {
+  if (!documentIds.length) return new Set();
+  const seen = await AuditLog.distinct('entityId', { actor: staff._id, action: 'document.viewed', entityType: 'UserDocument', entityId: { $in: documentIds } });
+  return new Set(seen.map(String));
+}
+
 /** Staff saw the money arrive (mobile money, bank, card receipt) and enter the transaction reference. */
 async function confirmManual(staff, id, { reference, note }, ctx) {
   const payment = await VerificationPayment.findById(id);
   if (!payment) throw new AppError(404, 'Payment not found', 'PAYMENT_NOT_FOUND');
+  // An administrator opens every uploaded document before confirming the payment that starts the review.
+  // The payment follow-up (finance) role cannot open identity documents, so it only confirms the money.
+  if (isAdmin(staff)) {
+    const ids = (await VerificationApplication.findById(payment.application).select('documents'))?.documents ?? [];
+    const opened = await openedBy(staff, ids);
+    const missing = ids.filter((d) => !opened.has(String(d))).length;
+    if (missing) throw new AppError(409, `Open ${missing === 1 ? 'the uploaded document' : `all ${missing} uploaded documents you have not opened yet`} before confirming this payment`, 'DOCUMENTS_NOT_OPENED', { missing });
+  }
   if (payment.gateway !== 'manual') throw new AppError(409, 'This payment is confirmed automatically by the payment gateway', 'GATEWAY_PAYMENT');
   if (payment.status === 'succeeded') throw new AppError(409, 'This payment is already confirmed', 'ALREADY_PAID');
   if (payment.status !== 'pending') throw new AppError(409, 'Only a pending payment can be confirmed', 'INVALID_STATUS_TRANSITION');
@@ -308,29 +386,31 @@ async function startReview(admin, id, _body, ctx) {
   const app = await loadForReview(id);
   const updated = await move(app, 'payment_confirmed', { status: 'under_review' }, entry(admin, actorRole(admin), 'review_started', 'payment_confirmed', 'under_review'));
   await audit.record({ actor: admin._id, action: 'verification.review_started', entityType: 'VerificationApplication', entityId: app._id, ctx, strict: true });
-  await tell(app.user, 'Your verification is under review', 'An administrator is now checking your documents.');
+  await tell(app.user, 'Your verification is under review', 'An administrator is now checking your documents.', app);
   return withRefs(VerificationApplication.findById(updated._id)).then((a) => toStaffJSON(a, { detail: true }));
 }
 
 async function requestInfo(admin, id, { message }, ctx) {
   const app = await loadForReview(id);
-  const updated = await move(app, ['payment_confirmed', 'under_review'], { status: 'more_info_required' }, entry(admin, actorRole(admin), 'info_requested', app.status, 'more_info_required', message));
+  // The super administrator may also ask for more before the final decision; the applicant's answer sends it back to an administrator.
+  if (app.status === 'recommended' && !isSuperAdmin(admin)) throw new AppError(409, 'This application is waiting for the super administrator’s decision', 'INVALID_STATUS_TRANSITION');
+  const updated = await move(app, ['payment_confirmed', 'under_review', 'recommended'], { status: 'more_info_required' }, entry(admin, actorRole(admin), 'info_requested', app.status, 'more_info_required', message));
   await VerificationApplication.updateOne({ _id: app._id }, { $push: { infoRequests: { by: admin._id, message, at: new Date() } } });
   await profileStatus(app, 'needs_info', message);
   await audit.record({ actor: admin._id, action: 'verification.info_requested', entityType: 'VerificationApplication', entityId: app._id, metadata: { message }, ctx, strict: true });
-  await tell(app.user, 'We need more information', message.slice(0, 380));
+  await tell(app.user, 'We need more information', message.slice(0, 380), app);
   return toStaffJSON(await withRefs(VerificationApplication.findById(updated._id)), { detail: true });
 }
 
 /** An administrator recommends approval, with the ratings and job history as evidence. It never verifies the provider. */
 async function recommend(admin, id, { note }, ctx) {
   const app = await loadForReview(id);
-  const ratings = await ratingSnapshot(app.provider);
+  const ratings = isAccount(app) ? undefined : await ratingSnapshot(app.provider);
   const updated = await move(app, 'under_review', { status: 'recommended', recommendation: { by: admin._id, note, at: new Date(), ratings } }, entry(admin, actorRole(admin), 'recommended', 'under_review', 'recommended', note));
-  await VerificationRecommendation.updateOne({ provider: app.provider, status: 'open' }, { $set: { status: 'actioned', resolvedBy: admin._id, resolvedAt: new Date(), resolutionNote: 'Recommended through the verification application' } });
+  if (!isAccount(app)) await VerificationRecommendation.updateOne({ provider: app.provider, status: 'open' }, { $set: { status: 'actioned', resolvedBy: admin._id, resolvedAt: new Date(), resolutionNote: 'Recommended through the verification application' } });
   await audit.record({ actor: admin._id, action: 'verification.recommended', entityType: 'VerificationApplication', entityId: app._id, metadata: { note, ratings }, ctx, strict: true });
-  await notifications.notifyMany(await superAdminIds(), { type: 'verification.recommendation', title: 'A provider is recommended for verification', body: note.slice(0, 380), link: `/dashboard/admin/verification/${app._id}` });
-  await tell(app.user, 'Your application was passed to final review', 'An administrator reviewed your documents. The final decision is made by the super administrator.');
+  await notifications.notifyMany(await superAdminIds(), { type: 'verification.recommendation', title: isAccount(app) ? 'An account is recommended for verification' : 'A provider is recommended for verification', body: note.slice(0, 380), link: `/dashboard/admin/verification/${app._id}` });
+  await tell(app.user, 'Your application was passed to final review', 'An administrator reviewed your documents. The final decision is made by the super administrator.', app);
   return toStaffJSON(await withRefs(VerificationApplication.findById(updated._id)), { detail: true });
 }
 
@@ -339,7 +419,7 @@ async function finishRejected(app, actor, reason, ctx, action) {
   const updated = await move(app, OPEN.filter((s) => s !== 'pending_payment'), { status: 'rejected', active: false, decision: { outcome: 'rejected', by: actor._id, byRole: role, reason, at: new Date() } }, entry(actor, role, 'rejected', app.status, 'rejected', reason));
   await profileStatus(app, 'rejected', reason);
   await audit.record({ actor: actor._id, action, entityType: 'VerificationApplication', entityId: app._id, metadata: { reason }, ctx, strict: true });
-  await tell(app.user, 'Your verification was not approved', reason.slice(0, 380));
+  await tell(app.user, 'Your verification was not approved', reason.slice(0, 380), app);
   return toStaffJSON(await withRefs(VerificationApplication.findById(updated._id)), { detail: true });
 }
 
@@ -361,7 +441,7 @@ async function decide(superAdmin, id, { outcome, reason }, ctx) {
   const updated = await move(app, 'recommended', { status: 'approved', active: false, decision: { outcome: 'approved', by: superAdmin._id, byRole: 'super_admin', reason: reason || undefined, at: now } }, entry(superAdmin, 'super_admin', 'approved', 'recommended', 'approved', reason));
   await profileStatus(app, 'verified', reason, { verifiedAt: now, verifiedBy: superAdmin._id });
   await audit.record({ actor: superAdmin._id, action: 'verification.approved', entityType: 'VerificationApplication', entityId: app._id, metadata: { reason }, ctx, strict: true });
-  await tell(app.user, 'Your profile is verified', 'You now appear in search and can publish services.');
+  await tell(app.user, isAccount(app) ? 'Your account is verified' : 'Your profile is verified', isAccount(app) ? 'Your account now shows a Verified badge.' : 'You now appear in search and can publish services.', app);
   return toStaffJSON(await withRefs(VerificationApplication.findById(updated._id)), { detail: true });
 }
 
@@ -380,7 +460,7 @@ async function reopen(superAdmin, id, { reason }, ctx) {
   await VerificationApplication.updateOne({ _id: app._id }, { $unset: { decision: '' } });
   await profileStatus(app, 'pending');
   await audit.record({ actor: superAdmin._id, action: 'verification.reopened', entityType: 'VerificationApplication', entityId: app._id, metadata: { reason }, ctx, strict: true });
-  await tell(app.user, 'Your application was reopened', 'The super administrator asked for it to be reviewed again.');
+  await tell(app.user, 'Your application was reopened', 'The super administrator asked for it to be reviewed again.', app);
   return toStaffJSON(await withRefs(VerificationApplication.findById(updated._id)), { detail: true });
 }
 
@@ -398,8 +478,10 @@ async function revoke(superAdmin, profileId, { reason }, ctx) {
 }
 
 // ---- Staff lists ----
-async function listForStaff({ page, limit, status, paymentStatus }) {
+async function listForStaff({ page, limit, status, paymentStatus, kind }) {
   const filter = { ...(status ? { status } : {}), ...(paymentStatus ? { paymentStatus } : {}) };
+  if (kind === 'account') filter.kind = 'account';
+  if (kind === 'provider') filter.kind = { $ne: 'account' }; // older rows have no kind: they are provider applications
   const [docs, total] = await Promise.all([
     withRefs(VerificationApplication.find(filter).sort({ updatedAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit)),
     VerificationApplication.countDocuments(filter),
@@ -407,19 +489,39 @@ async function listForStaff({ page, limit, status, paymentStatus }) {
   return { items: await Promise.all(docs.map((d) => toStaffJSON(d))), total };
 }
 
-async function getForStaff(id) {
+async function getForStaff(id, viewer, ctx) {
   const app = await withRefs(VerificationApplication.findById(id));
   if (!app) throw NOT_FOUND();
-  return toStaffJSON(app, { detail: true });
+  if (viewer) await audit.record({ actor: viewer._id, action: 'verification.viewed', entityType: 'VerificationApplication', entityId: app._id, metadata: { applicant: idOf(app.user) }, ctx });
+  return toStaffJSON(app, { detail: true, viewer });
 }
 
-async function listPayments({ page, limit, status }) {
+async function listPayments({ page, limit, status }, viewer) {
   const filter = status ? { status } : {};
   const [docs, total] = await Promise.all([
-    VerificationPayment.find(filter).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit).populate('user', 'fullName email').populate('application', 'status paymentStatus'),
+    VerificationPayment.find(filter).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit).populate('user', 'fullName email phone').populate('application', 'status paymentStatus'),
     VerificationPayment.countDocuments(filter),
   ]);
-  return { items: docs.map((p) => ({ ...paymentJSON(p), payerPhone: p.payerPhone, applicant: p.user?.fullName, applicationId: idOf(p.application), applicationStatus: p.application?.status })), total };
+  // Administrators also get the applicant's documents and which of them they have already opened. Finance staff do not see documents.
+  let docsByApp = new Map();
+  let opened = new Set();
+  if (viewer && isAdmin(viewer)) {
+    const apps = await VerificationApplication.find({ _id: { $in: docs.map((p) => idOf(p.application)) } }).select('documents');
+    const allIds = apps.flatMap((a) => a.documents);
+    const files = await UserDocument.find({ _id: { $in: allIds } });
+    opened = await openedBy(viewer, allIds);
+    const byId = new Map(files.map((f) => [String(f._id), f]));
+    docsByApp = new Map(apps.map((a) => [String(a._id), a.documents.map((d) => byId.get(String(d))).filter(Boolean).map((f) => ({ ...documentService.toJSON(f), openedByMe: opened.has(String(f._id)) }))]));
+  }
+  return {
+    items: docs.map((p) => ({
+      ...paymentJSON(p), payerPhone: p.payerPhone, applicant: p.user?.fullName, applicationId: idOf(p.application), applicationStatus: p.application?.status,
+      documents: viewer && isAdmin(viewer) ? docsByApp.get(idOf(p.application)) ?? [] : undefined,
+      applicantEmail: viewer && isAdmin(viewer) ? p.user?.email : undefined,
+      applicantPhone: viewer && isAdmin(viewer) ? p.user?.phone : undefined,
+    })),
+    total,
+  };
 }
 
-module.exports = { getMine, apply, startPayment, cancelPayment, respond, confirmManual, applyGatewayEvent, simulateSandbox, startReview, requestInfo, recommend, reject, decide, reopen, revoke, listForStaff, getForStaff, listPayments, ratingSnapshot, superAdminIds };
+module.exports = { getMine, getMineAccount, applyAccount, apply, startPayment, cancelPayment, respond, confirmManual, applyGatewayEvent, simulateSandbox, startReview, requestInfo, recommend, reject, decide, reopen, revoke, listForStaff, getForStaff, listPayments, ratingSnapshot, superAdminIds };

@@ -4,7 +4,7 @@ import { TextAreaField } from '../../components/ui/Field';
 import { Alert, Badge } from '../../components/ui/feedback';
 import { useToast } from '../../context/ToastContext';
 import { providerApi } from '../../services/providerApi';
-import { VERIFICATION_STATUS } from '../../utils/constants';
+import { PROFILE_VERIFICATION_STATUS } from '../../utils/constants';
 import { errorMessage } from '../../utils/errors';
 
 export default function VerificationPanel({ profile, onUpdated }) {
@@ -14,7 +14,7 @@ export default function VerificationPanel({ profile, onUpdated }) {
   const [error, setError] = useState('');
   const [reply, setReply] = useState('');
   const status = profile.verificationStatus;
-  const meta = VERIFICATION_STATUS[status];
+  const meta = PROFILE_VERIFICATION_STATUS[status];
 
   const request = async () => {
     setBusy(true); setError(''); setProblems([]);

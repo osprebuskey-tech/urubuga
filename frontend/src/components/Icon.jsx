@@ -26,6 +26,10 @@ const PATHS = {
   menu: 'M4 7h16M4 12h16M4 17h16',
   close: 'M6 6l12 12M18 6L6 18',
   check: 'M5 12l5 5 9-10',
+  bolt: 'M13 2L4 14h7l-1 8 9-12h-7z',
+  terminal: 'M3 5h18v14H3zM7 10l3 2-3 2M12 15h5',
+  camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 11a3.5 3.5 0 100 7 3.5 3.5 0 000-7z',
+  sofa: 'M5 11V8a2 2 0 012-2h10a2 2 0 012 2v3M3 13a2 2 0 014 0v2h10v-2a2 2 0 014 0v5H3zM6 18v2M18 18v2',
 };
 
 export default function Icon({ name, className = 'h-5 w-5' }) {

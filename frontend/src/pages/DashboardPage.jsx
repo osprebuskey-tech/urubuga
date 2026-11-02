@@ -16,7 +16,7 @@ import { ButtonLink } from '../components/ui/Button';
 import { Alert, Badge, ErrorState } from '../components/ui/feedback';
 import { PageLoader } from '../components/ui/Spinner';
 import AdminDashboard from '../features/admin/AdminDashboard';
-import { FOLLOW_UP_BUCKETS, ROLES, VERIFICATION_STATUS } from '../utils/constants';
+import { FOLLOW_UP_BUCKETS, ROLES, PROFILE_VERIFICATION_STATUS } from '../utils/constants';
 import { formatRWF, plural } from '../utils/format';
 
 function Card({ title, children, action }) {
@@ -39,7 +39,7 @@ function ProviderCard() {
   if (!p) {
     return <Card title="Your provider profile" action={<ButtonLink to="/dashboard/provider/profile">Create your profile</ButtonLink>}>You haven’t set up your profile yet. Add your skills and location to get verified and listed.</Card>;
   }
-  const v = VERIFICATION_STATUS[p.verificationStatus];
+  const v = PROFILE_VERIFICATION_STATUS[p.verificationStatus];
   return (
     <>
       <Card title="Your provider profile" action={<ButtonLink to="/dashboard/provider/profile" variant="outline">{p.verificationStatus === 'verified' ? 'Edit profile' : 'Continue setup'}</ButtonLink>}>

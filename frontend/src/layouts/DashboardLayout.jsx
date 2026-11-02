@@ -29,6 +29,7 @@ const SECTIONS = [
   { title: 'Hiring', roles: [ROLES.CUSTOMER, ROLES.BUSINESS], links: [
     { to: '/dashboard/requests', label: 'My requests', icon: 'document', end: true },
     { to: '/dashboard/requests/new', label: 'New request', icon: 'plus' },
+    { to: '/dashboard/verification', label: 'Get verified', icon: 'shield' },
   ] },
   { title: 'Your services', roles: [ROLES.PROVIDER], links: [
     { to: '/dashboard/provider/requests', label: 'Requests for you', icon: 'document' },

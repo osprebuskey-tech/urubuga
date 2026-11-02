@@ -18,6 +18,14 @@ const staff = {
   confirm: (t, id, body = { reference: 'MOMO-1001' }) => api().post(`/api/admin/verification-payments/${id}/confirm`).set(bearer(t)).send(body),
   act: (t, id, action, body) => api().post(`/api/admin/verification/${id}/${action}`).set(bearer(t)).send(body),
 };
+// An administrator opens every uploaded document before confirming a payment. Opening is what is audited (the stub files are not in
+// storage, so the response itself does not matter), then the payment can be confirmed.
+const openDocuments = async (token, paymentId) => {
+  const payment = await VerificationPayment.findById(paymentId);
+  const app = await VerificationApplication.findById(payment.application);
+  for (const id of app.documents) await api().get(`/api/documents/${id}/file`).set(bearer(token));
+};
+staff.openAndConfirm = async (t, id, body) => { await openDocuments(t, id); return staff.confirm(t, id, body); };
 const webhook = (signed) => api().post('/api/payments/webhook/sandbox').set('Content-Type', 'application/json').set(signed.headers).send(signed.rawBody);
 
 /** An applicant who has applied and has a pending manual payment. */
@@ -171,7 +179,8 @@ describe('paying the fee', () => {
 
   test('payment alone never makes anyone verified', async () => {
     const { provider, payment } = await paying();
-    await staff.confirm((await createAdmin()).token, payment.id);
+    const a1 = await createAdmin();
+    await staff.openAndConfirm(a1.token, payment.id);
     const profile = await ProviderProfile.findById(provider.profile._id);
     expect(profile.verificationStatus).toBe('pending');
     expect(profile.verifiedAt).toBeUndefined();
@@ -182,8 +191,8 @@ describe('paying the fee', () => {
     const one = await paying();
     const two = await (async () => { const p = await applicant(); await apply(p); return { provider: p, payment: (await pay(p)).body.data.payment }; })();
     const admin = await createAdmin();
-    expect((await staff.confirm(admin.token, one.payment.id, { reference: 'SAME-REF' })).status).toBe(200);
-    const res = await staff.confirm(admin.token, two.payment.id, { reference: 'SAME-REF' });
+    expect((await staff.openAndConfirm(admin.token, one.payment.id, { reference: 'SAME-REF' })).status).toBe(200);
+    const res = await staff.openAndConfirm(admin.token, two.payment.id, { reference: 'SAME-REF' });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('REFERENCE_USED');
     expect((await VerificationPayment.findById(two.payment.id)).status).toBe('pending');
@@ -194,7 +203,7 @@ describe('paying the fee', () => {
     const provider = await applicant();
     await apply(provider);
     const { payment } = (await pay(provider, { method: 'card', gateway: 'sandbox' })).body.data;
-    expect((await staff.confirm((await createAdmin()).token, payment.id)).body.error.code).toBe('GATEWAY_PAYMENT'); // staff cannot overrule a gateway
+    expect((await staff.openAndConfirm((await createAdmin()).token, payment.id)).body.error.code).toBe('GATEWAY_PAYMENT'); // staff cannot overrule a gateway
     const stored = await VerificationPayment.findById(payment.id);
 
     const wrong = sandbox.buildSignedEvent({ reference: stored.gatewayReference, amount: 1 });
@@ -229,7 +238,7 @@ describe('review: administrators recommend, the super administrator decides', ()
     const { provider, payment } = await paying();
     const admin = await createAdmin();
     const boss = await createSession(['super_admin']);
-    await staff.confirm(admin.token, payment.id);
+    await staff.openAndConfirm(admin.token, payment.id);
     const app = await VerificationApplication.findOne({ provider: provider.profile._id });
     return { provider, admin, boss, app };
   };
@@ -310,5 +319,61 @@ describe('review: administrators recommend, the super administrator decides', ()
     expect((await api().get(`/api/admin/verification/${app._id}`)).status).toBe(401);
     const admin = await createAdmin();
     expect((await api().get('/api/admin/verification?paymentStatus=confirmed').set(bearer(admin.token))).body.data).toHaveLength(1);
+  });
+});
+
+describe('opening the documents before confirming a manual payment', () => {
+  const listPayments = (t) => api().get('/api/admin/verification-payments?status=pending').set(bearer(t));
+
+  test('an administrator must open every uploaded document first, and each opening is audited', async () => {
+    const { payment } = await paying();
+    const admin = await createAdmin();
+    const refused = await staff.confirm(admin.token, payment.id);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.code).toBe('DOCUMENTS_NOT_OPENED');
+
+    await openDocuments(admin.token, payment.id);
+    expect((await staff.confirm(admin.token, payment.id)).status).toBe(200);
+    expect(await AuditLog.countDocuments({ actor: admin.user._id, action: 'document.viewed' })).toBeGreaterThan(0);
+  });
+
+  test('another administrator opening them does not count: each person opens for themselves', async () => {
+    const { payment } = await paying();
+    const first = await createAdmin();
+    const second = await createAdmin();
+    await openDocuments(first.token, payment.id);
+    expect((await staff.confirm(second.token, payment.id)).body.error.code).toBe('DOCUMENTS_NOT_OPENED');
+  });
+
+  test('the payments list shows an administrator the documents, the applicant\'s contact details and what they have opened; finance sees none of it', async () => {
+    const { payment } = await paying();
+    const admin = await createAdmin();
+    const finance = await createSession(['finance']);
+    const before = (await listPayments(admin.token)).body.data[0];
+    expect(before.documents.length).toBeGreaterThan(0);
+    expect(before.documents.every((d) => d.openedByMe === false)).toBe(true);
+    expect(before.applicantEmail).toBeTruthy();
+
+    await openDocuments(admin.token, payment.id);
+    expect((await listPayments(admin.token)).body.data[0].documents.every((d) => d.openedByMe === true)).toBe(true);
+
+    const seenByFinance = (await listPayments(finance.token)).body.data[0];
+    expect(seenByFinance.documents).toBeUndefined();
+    expect(seenByFinance.applicantEmail).toBeUndefined();
+  });
+
+  test('the super administrator can open the documents and sees the applicant\'s private details, and viewing is audited', async () => {
+    const { payment } = await paying();
+    const boss = await createSession(['super_admin']);
+    await openDocuments(boss.token, payment.id);
+    expect((await staff.confirm(boss.token, payment.id)).status).toBe(200);
+
+    const appId = (await VerificationPayment.findById(payment.id)).application;
+    const detail = await api().get(`/api/admin/verification/${appId}`).set(bearer(boss.token));
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.application.applicant).toHaveProperty('email');
+    expect(detail.body.data.application.applicant).toHaveProperty('phone');
+    expect(detail.body.data.application.documents.every((d) => d.openedByMe === true)).toBe(true);
+    expect(await AuditLog.countDocuments({ actor: boss.user._id, action: 'verification.viewed' })).toBe(1);
   });
 });

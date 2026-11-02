@@ -60,6 +60,7 @@ export const router = createBrowserRouter([
           {
             element: <ProtectedRoute roles={[ROLES.CUSTOMER, ROLES.BUSINESS]} />,
             children: [
+              { path: 'verification', ...page(() => import('../pages/AccountVerificationPage')) },
               { path: 'requests', ...page(() => import('../pages/requests/RequestsPage')) },
               { path: 'requests/new', ...page(() => import('../pages/requests/NewRequestPage')) },
               { path: 'requests/:id/edit', ...page(() => import('../pages/requests/RequestEditPage')) },

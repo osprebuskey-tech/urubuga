@@ -20,11 +20,14 @@ exports.apply = asyncHandler(async (req, res) => ok(res, { application: await ve
 exports.pay = asyncHandler(async (req, res) => ok(res, { payment: await verification.startPayment(req.user, v(req).body, ctxOf(req)) }, { status: 201 }));
 exports.cancelPay = asyncHandler(async (req, res) => ok(res, { payment: await verification.cancelPayment(req.user) }));
 exports.respond = asyncHandler(async (req, res) => ok(res, { application: await verification.respond(req.user, v(req).body) }));
+exports.mineAccount = asyncHandler(async (req, res) => ok(res, await verification.getMineAccount(req.user)));
+exports.applyAccount = asyncHandler(async (req, res) => ok(res, { application: await verification.applyAccount(req.user, ctxOf(req)) }, { status: 201 }));
+exports.respondAccount = asyncHandler(async (req, res) => ok(res, { application: await verification.respond(req.user, v(req).body, 'account') }));
 exports.sandbox = asyncHandler(async (req, res) => ok(res, await verification.simulateSandbox(req.user, v(req).params.outcome)));
 
 // ---- Staff ----
 exports.list = asyncHandler(async (req, res) => paged(res, await verification.listForStaff(v(req).query), v(req).query));
-exports.get = asyncHandler(async (req, res) => ok(res, { application: await verification.getForStaff(v(req).params.id) }));
+exports.get = asyncHandler(async (req, res) => ok(res, { application: await verification.getForStaff(v(req).params.id, req.user, ctxOf(req)) }));
 const action = (name) => asyncHandler(async (req, res) => ok(res, { application: await verification[name](req.user, v(req).params.id, v(req).body, ctxOf(req)) }));
 exports.startReview = action('startReview');
 exports.requestInfo = action('requestInfo');
@@ -32,7 +35,7 @@ exports.recommend = action('recommend');
 exports.reject = action('reject');
 exports.decide = action('decide');
 exports.reopen = action('reopen');
-exports.payments = asyncHandler(async (req, res) => paged(res, await verification.listPayments(v(req).query), v(req).query));
+exports.payments = asyncHandler(async (req, res) => paged(res, await verification.listPayments(v(req).query, req.user), v(req).query));
 exports.confirmPayment = asyncHandler(async (req, res) => ok(res, { payment: await verification.confirmManual(req.user, v(req).params.id, v(req).body, ctxOf(req)) }));
 exports.setFee = asyncHandler(async (req, res) => ok(res, { fee: await settings.setVerificationFee(req.user, v(req).body, ctxOf(req)) }));
 

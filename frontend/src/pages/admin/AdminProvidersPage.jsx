@@ -12,7 +12,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAsync } from '../../hooks/useAsync';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
 import { adminApi } from '../../services/adminApi';
-import { ROLES, VERIFICATION_STATUS } from '../../utils/constants';
+import { ROLES, PROFILE_VERIFICATION_STATUS } from '../../utils/constants';
 import { errorMessage } from '../../utils/errors';
 import { formatDate, plural } from '../../utils/format';
 
@@ -105,7 +105,7 @@ export default function AdminProvidersPage() {
       <div className="mb-5 flex flex-wrap gap-2" role="group" aria-label="Filter by status">
         {TABS.map((t) => (
           <button key={t} type="button" aria-pressed={tab === t} onClick={() => { setTab(t); setPage(1); }} className={`rounded-full border px-4 py-1.5 text-sm font-semibold ${tab === t ? 'border-ink-900 bg-ink-900 text-white' : 'border-ink-200 hover:bg-ink-50'}`}>
-            {TAB_LABELS[t] || VERIFICATION_STATUS[t].label}
+            {TAB_LABELS[t] || PROFILE_VERIFICATION_STATUS[t].label}
           </button>
         ))}
       </div>
@@ -117,7 +117,7 @@ export default function AdminProvidersPage() {
         <>
           <ul className="space-y-4">
             {list.data.map((p) => {
-              const st = VERIFICATION_STATUS[p.verificationStatus];
+              const st = PROFILE_VERIFICATION_STATUS[p.verificationStatus];
               return (
                 <li key={p.id} className="panel p-5">
                   <div className="flex flex-wrap items-start justify-between gap-4">
